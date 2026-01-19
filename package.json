@@ -8,7 +8,8 @@
         "cmc-mcp": "./build/index.js"
     },
     "scripts": {
-        "build": "tsc && chmod 755 build/index.js",
+          "build": "tsc && chmod 755 build/index.js",
+          "discover": "tsx examples/run-discover-top.ts 20 5 1h 250 market_cap desc",
         "prepublishOnly": "npm run build"
     },
     "keywords": [
@@ -34,10 +35,13 @@
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "latest",
-        "zod": "latest"
+        "zod": "latest",
+        "dotenv": "^16.3.1",
+        "node-fetch": "^3.3.2"
     },
     "devDependencies": {
         "@types/node": "latest",
-        "typescript": "latest"
+        "typescript": "latest",
+        "tsx": "^4.6.2"
     }
 }

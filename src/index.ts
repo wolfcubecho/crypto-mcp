@@ -18,6 +18,20 @@ const server = new McpServer({
 });
 
 // Helper function for making CoinMarketCap API requests
+// Simple in-memory cache with TTL
+const CACHE_TTL_MS = parseInt(process.env.COINMARKET_CACHE_TTL || "15000", 10);
+const apiCache: Map<string, { ts: number; data: any }> = new Map();
+
+function buildCacheKey(endpoint: string, params: Record<string, any>): string {
+    const sortedParams = Object.keys(params)
+        .sort()
+        .reduce((acc, key) => {
+            (acc as any)[key] = (params as any)[key];
+            return acc;
+        }, {} as Record<string, any>);
+    return `${endpoint}|${JSON.stringify(sortedParams)}`;
+}
+
 async function makeApiRequest<T>(
     endpoint: string,
     params: Record<string, any> = {},
@@ -36,12 +50,21 @@ async function makeApiRequest<T>(
         }
     });
 
+    // Cache lookup
+    const key = buildCacheKey(endpoint, params);
+    const cached = apiCache.get(key);
+    if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+        return cached.data as T;
+    }
+
     try {
         const response = await fetch(url.toString(), { headers });
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        return (await response.json()) as T;
+        const json = (await response.json()) as T;
+        apiCache.set(key, { ts: Date.now(), data: json });
+        return json;
     } catch (error) {
         console.error("Error making CoinMarketCap API request:", error);
         return null;
@@ -382,6 +405,111 @@ server.tool(
             ],
         };
     },
+);
+
+// Aggregated discovery: CMC top-N then narrow via Binance (compact summary)
+const STABLES = new Set(["USDT","USDC","BUSD","TUSD","DAI","FDUSD"]);
+function calcEMA(arr: number[], n: number): number | null {
+    if (arr.length < n) return null;
+    const k = 2 / (n + 1);
+    let ema = arr[0];
+    for (let i = 1; i < arr.length; i++) ema = arr[i] * k + ema * (1 - k);
+    return ema;
+}
+function sma(arr: number[], n: number): number | null {
+    if (arr.length < n) return null;
+    let sum = 0; for (let i = arr.length - n; i < arr.length; i++) sum += arr[i];
+    return sum / n;
+}
+function rma(arr: number[], n: number): number | null {
+    if (arr.length < n) return null;
+    let sum = 0; for (let i = 0; i < n; i++) sum += arr[i];
+    let val = sum / n; const alpha = 1 / n;
+    for (let i = n; i < arr.length; i++) val = alpha * arr[i] + (1 - alpha) * val;
+    return val;
+}
+
+server.tool(
+    "discover-top",
+    "CMC top-N discovery narrowed to resultCount via Binance 24h + OHLCV. Sort by market_cap, volume_24h, or percent_change_24h.",
+    {
+        topN: z.string().optional().describe("Number of CMC listings to scan (default: 20)"),
+        resultCount: z.string().optional().describe("Number of results to return (default: 5)"),
+        interval: z.string().optional().describe("Kline interval (default: 1h)"),
+        limit: z.string().optional().describe("Number of klines to fetch (default: 250)"),
+        convert: z.string().optional().describe("CMC convert currency (default: USD)"),
+        sort: z.string().optional().describe("CMC sort field: market_cap | volume_24h | percent_change_24h (default: market_cap)"),
+        sort_dir: z.string().optional().describe("Sort direction: desc | asc (default: desc)"),
+    },
+    async (params) => {
+        const topN = parseInt(params.topN ?? "20", 10);
+        const resultCount = parseInt(params.resultCount ?? "5", 10);
+        const interval = params.interval ?? "1h";
+        const limit = parseInt(params.limit ?? "250", 10);
+        const convert = params.convert ?? "USD";
+
+        // Step 1: CMC listings
+        const sort = params.sort ?? "market_cap";
+        const sort_dir = params.sort_dir ?? "desc";
+        const listings = await makeApiRequest<any>("/cryptocurrency/listings/latest", { limit: topN, convert, sort, sort_dir });
+        const data = listings?.data ?? [];
+        const summaries: Array<{ symbol: string; price: number | null; pct24h: number | null; vol24h: number | null; atrPct: number | null; trend: 'up'|'down'|null; rating: 'strong_up'|'up'|'neutral'|'down'|'strong_down'; cmc?: { market_cap?: number; percent_change_24h?: number; rank?: number } | null; }>= [];
+
+        for (const item of data) {
+            const base: string = item?.symbol;
+            if (!base || STABLES.has(base)) continue;
+            const symbol = `${base}USDT`;
+            try {
+                const tRes = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`);
+                if (!tRes.ok) continue;
+                const ticker: any = await tRes.json();
+                const kRes = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+                if (!kRes.ok) continue;
+                const klines: any[] = await kRes.json() as any[];
+                const closes = klines.map(k => parseFloat(k[4]));
+                const highs = klines.map(k => parseFloat(k[2]));
+                const lows = klines.map(k => parseFloat(k[3]));
+                const lastClose = closes[closes.length - 1] ?? null;
+                const tr: number[] = [];
+                for (let i = 0; i < closes.length; i++) {
+                    const hl = (highs[i] ?? 0) - (lows[i] ?? 0);
+                    const hc = i > 0 ? Math.abs((highs[i] ?? 0) - (closes[i-1] ?? 0)) : 0;
+                    const lc = i > 0 ? Math.abs((lows[i] ?? 0) - (closes[i-1] ?? 0)) : 0;
+                    tr.push(Math.max(hl, hc, lc));
+                }
+                const atr = rma(tr, 14);
+                const atrPct = atr && lastClose ? (atr / lastClose) * 100 : null;
+                const ema50 = calcEMA(closes, 50);
+                const ema200 = calcEMA(closes, 200);
+                const sma200 = sma(closes, 200);
+                let trend: 'up'|'down'|null = null;
+                if (ema50 !== null && ema200 !== null) trend = ema50 > ema200 ? 'up' : 'down';
+                else if (sma200 !== null && lastClose !== null) trend = lastClose > sma200 ? 'up' : 'down';
+                const pct24h = ticker ? parseFloat(ticker.priceChangePercent) : null;
+                const vol24h = ticker ? parseFloat(ticker.volume) : null;
+                const cmcSlim = item ? {
+                    market_cap: item.quote?.[convert]?.market_cap,
+                    percent_change_24h: item.quote?.[convert]?.percent_change_24h,
+                    rank: item.cmc_rank,
+                } : null;
+                let rating: 'strong_up'|'up'|'neutral'|'down'|'strong_down' = 'neutral';
+                if (trend === 'up') rating = pct24h !== null && pct24h > 2 ? 'strong_up' : (pct24h !== null && pct24h > 1 ? 'up' : 'neutral');
+                if (trend === 'down') rating = pct24h !== null && pct24h < -2 ? 'strong_down' : (pct24h !== null && pct24h < -1 ? 'down' : 'neutral');
+                summaries.push({ symbol, price: lastClose, pct24h, vol24h, atrPct, trend, rating, cmc: cmcSlim });
+            } catch { /* skip symbol on error */ }
+        }
+
+        const ratingScore = (r: 'strong_up'|'up'|'neutral'|'down'|'strong_down') => ({ strong_up: 4, up: 3, neutral: 2, down: 1, strong_down: 0 }[r]);
+        summaries.sort((a, b) => {
+            const ra = ratingScore(a.rating); const rb = ratingScore(b.rating);
+            if (rb !== ra) return rb - ra;
+            const ma = a.pct24h !== null ? Math.abs(a.pct24h) : 0;
+            const mb = b.pct24h !== null ? Math.abs(b.pct24h) : 0;
+            return mb - ma;
+        });
+        const top = summaries.slice(0, resultCount);
+        return { content: [ { type: "text", text: JSON.stringify(top, null, 2) } ] };
+    }
 );
 
 // Run the server
