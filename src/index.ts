@@ -529,6 +529,8 @@ server.tool(
         sort: z.string().optional().describe("CMC sort field: market_cap | volume_24h | percent_change_24h (default: market_cap)"),
         sort_dir: z.string().optional().describe("Sort direction: desc | asc (default: desc)"),
         strategy: z.string().optional().describe("Ranking strategy: strong_up_low_atr | strong_up_high_vol (default: strong_up_low_atr)"),
+        rankMax: z.string().optional().describe("Max CMC rank to include (default: 50)"),
+        atrPctMax: z.string().optional().describe("Max ATR% to include (default: 1.0)"),
     },
     async (params) => {
         const topN = parseInt(params.topN ?? "20", 10);
@@ -537,6 +539,8 @@ server.tool(
         const limit = parseInt(params.limit ?? "250", 10);
         const convert = params.convert ?? "USD";
         const strategy = (params.strategy ?? "strong_up_low_atr").toLowerCase();
+        const rankMax = parseInt(params.rankMax ?? "50", 10);
+        const atrPctMax = parseFloat(params.atrPctMax ?? "1.0");
 
         // Step 1: CMC listings
         const sort = params.sort ?? "market_cap";
@@ -589,6 +593,13 @@ server.tool(
             } catch { /* skip symbol on error */ }
         }
 
+        // Apply filters: by rank and ATR%
+        const filtered = summaries.filter(s => {
+            const rankOk = s.cmc?.rank !== undefined ? (s.cmc!.rank! <= rankMax) : false;
+            const atrOk = s.atrPct !== null ? (s.atrPct! <= atrPctMax) : false;
+            return rankOk && atrOk;
+        });
+
         const ratingScore = (r: 'strong_up'|'up'|'neutral'|'down'|'strong_down') => ({ strong_up: 4, up: 3, neutral: 2, down: 1, strong_down: 0 }[r]);
         const cmp = (a: typeof summaries[number], b: typeof summaries[number]) => {
             const ra = ratingScore(a.rating); const rb = ratingScore(b.rating);
@@ -610,8 +621,8 @@ server.tool(
             const mb = b.pct24h !== null ? Math.abs(b.pct24h) : 0;
             return mb - ma;
         };
-        summaries.sort(cmp);
-        const top = summaries.slice(0, resultCount);
+        filtered.sort(cmp);
+        const top = filtered.slice(0, resultCount);
         return { content: [ { type: "text", text: JSON.stringify(top, null, 2) } ] };
     }
 );
