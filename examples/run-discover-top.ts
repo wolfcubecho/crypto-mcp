@@ -22,11 +22,13 @@ function rate(trend: 'up'|'down'|null, pct24h: number | null) {
 }
 
 async function main() {
-  const [topNArg, resultArg, interval = '1h', limitArg, sort = 'market_cap', sort_dir = 'desc'] = process.argv.slice(2);
+  const [topNArg, resultArg, interval = '1h', limitArg, sort = 'market_cap', sort_dir = 'desc', rankMaxArg, atrPctMaxArg] = process.argv.slice(2);
   const topN = parseInt(topNArg || '20', 10);
   const resultCount = parseInt(resultArg || '5', 10);
   const limit = parseInt(limitArg || '250', 10);
   const convert = 'USD';
+  const rankMax = parseInt(rankMaxArg || '50', 10);
+  const atrPctMax = parseFloat(atrPctMaxArg || '1.0');
 
   if (!process.env.COINMARKET_API_KEY) console.warn('COINMARKET_API_KEY not set; CMC calls will fail');
 
@@ -60,15 +62,22 @@ async function main() {
     } catch {}
   }
 
+  // Apply filters: by rank and ATR%
+  const filtered = out.filter(s => {
+    const rankOk = s.cmc?.rank !== undefined ? (s.cmc.rank <= rankMax) : false;
+    const atrOk = s.atrPct !== null ? (s.atrPct <= atrPctMax) : false;
+    return rankOk && atrOk;
+  });
+
   const score: Record<string, number> = { strong_up: 4, up: 3, neutral: 2, down: 1, strong_down: 0 };
-  out.sort((a,b)=>{
+  filtered.sort((a,b)=>{
     const ra = score[a.rating]??0, rb = score[b.rating]??0; if (rb!==ra) return rb-ra;
     const aAtr = a.atrPct !== null ? a.atrPct : Number.POSITIVE_INFINITY;
     const bAtr = b.atrPct !== null ? b.atrPct : Number.POSITIVE_INFINITY;
     if (aAtr !== bAtr) return aAtr - bAtr; // lower ATR% first
     const ma = a.pct24h?Math.abs(a.pct24h):0, mb = b.pct24h?Math.abs(b.pct24h):0; return mb-ma;
   });
-  console.log(JSON.stringify(out.slice(0, resultCount), null, 2));
+  console.log(JSON.stringify(filtered.slice(0, resultCount), null, 2));
   process.exit(0);
 }
 
