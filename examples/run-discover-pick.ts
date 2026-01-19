@@ -22,11 +22,12 @@ function rate(trend: 'up'|'down'|null, pct24h: number | null) {
 }
 
 async function main() {
-  const [topNArg, resultArg, interval = '1h', limitArg, sort = 'market_cap', sort_dir = 'desc'] = process.argv.slice(2);
+  const [topNArg, resultArg, strategyArg = 'strong_up_low_atr', interval = '1h', limitArg, sort = 'market_cap', sort_dir = 'desc'] = process.argv.slice(2);
   const topN = parseInt(topNArg || '20', 10);
   const resultCount = parseInt(resultArg || '5', 10);
   const limit = parseInt(limitArg || '250', 10);
   const convert = 'USD';
+  const strategy = (strategyArg || 'strong_up_low_atr').toLowerCase();
 
   if (!process.env.COINMARKET_API_KEY) console.warn('COINMARKET_API_KEY not set; CMC calls will fail');
 
@@ -61,13 +62,22 @@ async function main() {
   }
 
   const score: Record<string, number> = { strong_up: 4, up: 3, neutral: 2, down: 1, strong_down: 0 };
-  out.sort((a,b)=>{
+  const cmp = (a: any, b: any) => {
     const ra = score[a.rating]??0, rb = score[b.rating]??0; if (rb!==ra) return rb-ra;
-    const aAtr = a.atrPct !== null ? a.atrPct : Number.POSITIVE_INFINITY;
-    const bAtr = b.atrPct !== null ? b.atrPct : Number.POSITIVE_INFINITY;
-    if (aAtr !== bAtr) return aAtr - bAtr; // lower ATR% first
+    if (strategy === 'strong_up_high_vol') {
+      const va = a.vol24h ?? 0, vb = b.vol24h ?? 0; if (vb !== va) return vb - va; // higher volume first
+      const aAtr = a.atrPct !== null ? a.atrPct : Number.POSITIVE_INFINITY;
+      const bAtr = b.atrPct !== null ? b.atrPct : Number.POSITIVE_INFINITY;
+      if (aAtr !== bAtr) return aAtr - bAtr; // then lower ATR%
+    } else {
+      const aAtr = a.atrPct !== null ? a.atrPct : Number.POSITIVE_INFINITY;
+      const bAtr = b.atrPct !== null ? b.atrPct : Number.POSITIVE_INFINITY;
+      if (aAtr !== bAtr) return aAtr - bAtr; // lower ATR% first
+      const va = a.vol24h ?? 0, vb = b.vol24h ?? 0; if (vb !== va) return vb - va; // then higher volume
+    }
     const ma = a.pct24h?Math.abs(a.pct24h):0, mb = b.pct24h?Math.abs(b.pct24h):0; return mb-ma;
-  });
+  };
+  out.sort(cmp);
   console.log(JSON.stringify(out.slice(0, resultCount), null, 2));
   process.exit(0);
 }

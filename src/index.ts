@@ -500,13 +500,117 @@ server.tool(
         }
 
         const ratingScore = (r: 'strong_up'|'up'|'neutral'|'down'|'strong_down') => ({ strong_up: 4, up: 3, neutral: 2, down: 1, strong_down: 0 }[r]);
+        // Ranking: prioritize strong_up and lower ATR%, then larger 24h move
         summaries.sort((a, b) => {
             const ra = ratingScore(a.rating); const rb = ratingScore(b.rating);
             if (rb !== ra) return rb - ra;
+            const aAtr = a.atrPct !== null ? a.atrPct : Number.POSITIVE_INFINITY;
+            const bAtr = b.atrPct !== null ? b.atrPct : Number.POSITIVE_INFINITY;
+            if (aAtr !== bAtr) return aAtr - bAtr; // lower ATR% first
             const ma = a.pct24h !== null ? Math.abs(a.pct24h) : 0;
             const mb = b.pct24h !== null ? Math.abs(b.pct24h) : 0;
             return mb - ma;
         });
+        const top = summaries.slice(0, resultCount);
+        return { content: [ { type: "text", text: JSON.stringify(top, null, 2) } ] };
+    }
+);
+
+// Single-call picker: CMC top-N then pick best via explicit strategy
+server.tool(
+    "discover-pick",
+    "CMC top-N discovery then pick best resultCount via strategy (e.g., strong_up_low_atr).",
+    {
+        topN: z.string().optional().describe("Number of CMC listings to scan (default: 20)"),
+        resultCount: z.string().optional().describe("Number of results to return (default: 5)"),
+        interval: z.string().optional().describe("Kline interval (default: 1h)"),
+        limit: z.string().optional().describe("Number of klines to fetch (default: 250)"),
+        convert: z.string().optional().describe("CMC convert currency (default: USD)"),
+        sort: z.string().optional().describe("CMC sort field: market_cap | volume_24h | percent_change_24h (default: market_cap)"),
+        sort_dir: z.string().optional().describe("Sort direction: desc | asc (default: desc)"),
+        strategy: z.string().optional().describe("Ranking strategy: strong_up_low_atr | strong_up_high_vol (default: strong_up_low_atr)"),
+    },
+    async (params) => {
+        const topN = parseInt(params.topN ?? "20", 10);
+        const resultCount = parseInt(params.resultCount ?? "5", 10);
+        const interval = params.interval ?? "1h";
+        const limit = parseInt(params.limit ?? "250", 10);
+        const convert = params.convert ?? "USD";
+        const strategy = (params.strategy ?? "strong_up_low_atr").toLowerCase();
+
+        // Step 1: CMC listings
+        const sort = params.sort ?? "market_cap";
+        const sort_dir = params.sort_dir ?? "desc";
+        const listings = await makeApiRequest<any>("/cryptocurrency/listings/latest", { limit: topN, convert, sort, sort_dir });
+        const data = listings?.data ?? [];
+        const summaries: Array<{ symbol: string; price: number | null; pct24h: number | null; vol24h: number | null; atrPct: number | null; trend: 'up'|'down'|null; rating: 'strong_up'|'up'|'neutral'|'down'|'strong_down'; cmc?: { market_cap?: number; percent_change_24h?: number; rank?: number } | null; }>= [];
+
+        for (const item of data) {
+            const base: string = item?.symbol;
+            if (!base || STABLES.has(base)) continue;
+            const symbol = `${base}USDT`;
+            try {
+                const tRes = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`);
+                if (!tRes.ok) continue;
+                const ticker: any = await tRes.json();
+                const kRes = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+                if (!kRes.ok) continue;
+                const klines: any[] = await kRes.json() as any[];
+                const closes = klines.map(k => parseFloat(k[4]));
+                const highs = klines.map(k => parseFloat(k[2]));
+                const lows = klines.map(k => parseFloat(k[3]));
+                const lastClose = closes[closes.length - 1] ?? null;
+                const tr: number[] = [];
+                for (let i = 0; i < closes.length; i++) {
+                    const hl = (highs[i] ?? 0) - (lows[i] ?? 0);
+                    const hc = i > 0 ? Math.abs((highs[i] ?? 0) - (closes[i-1] ?? 0)) : 0;
+                    const lc = i > 0 ? Math.abs((lows[i] ?? 0) - (closes[i-1] ?? 0)) : 0;
+                    tr.push(Math.max(hl, hc, lc));
+                }
+                const atr = rma(tr, 14);
+                const atrPct = atr && lastClose ? (atr / lastClose) * 100 : null;
+                const ema50 = calcEMA(closes, 50);
+                const ema200 = calcEMA(closes, 200);
+                const sma200 = sma(closes, 200);
+                let trend: 'up'|'down'|null = null;
+                if (ema50 !== null && ema200 !== null) trend = ema50 > ema200 ? 'up' : 'down';
+                else if (sma200 !== null && lastClose !== null) trend = lastClose > sma200 ? 'up' : 'down';
+                const pct24h = ticker ? parseFloat(ticker.priceChangePercent) : null;
+                const vol24h = ticker ? parseFloat(ticker.volume) : null;
+                const cmcSlim = item ? {
+                    market_cap: item.quote?.[convert]?.market_cap,
+                    percent_change_24h: item.quote?.[convert]?.percent_change_24h,
+                    rank: item.cmc_rank,
+                } : null;
+                let rating: 'strong_up'|'up'|'neutral'|'down'|'strong_down' = 'neutral';
+                if (trend === 'up') rating = pct24h !== null && pct24h > 2 ? 'strong_up' : (pct24h !== null && pct24h > 1 ? 'up' : 'neutral');
+                if (trend === 'down') rating = pct24h !== null && pct24h < -2 ? 'strong_down' : (pct24h !== null && pct24h < -1 ? 'down' : 'neutral');
+                summaries.push({ symbol, price: lastClose, pct24h, vol24h, atrPct, trend, rating, cmc: cmcSlim });
+            } catch { /* skip symbol on error */ }
+        }
+
+        const ratingScore = (r: 'strong_up'|'up'|'neutral'|'down'|'strong_down') => ({ strong_up: 4, up: 3, neutral: 2, down: 1, strong_down: 0 }[r]);
+        const cmp = (a: typeof summaries[number], b: typeof summaries[number]) => {
+            const ra = ratingScore(a.rating); const rb = ratingScore(b.rating);
+            if (rb !== ra) return rb - ra;
+            if (strategy === 'strong_up_high_vol') {
+                const va = a.vol24h ?? 0; const vb = b.vol24h ?? 0;
+                if (vb !== va) return vb - va; // higher volume first
+                const aAtr = a.atrPct !== null ? a.atrPct : Number.POSITIVE_INFINITY;
+                const bAtr = b.atrPct !== null ? b.atrPct : Number.POSITIVE_INFINITY;
+                if (aAtr !== bAtr) return aAtr - bAtr; // lower ATR% next
+            } else { // strong_up_low_atr (default)
+                const aAtr = a.atrPct !== null ? a.atrPct : Number.POSITIVE_INFINITY;
+                const bAtr = b.atrPct !== null ? b.atrPct : Number.POSITIVE_INFINITY;
+                if (aAtr !== bAtr) return aAtr - bAtr; // lower ATR% first
+                const va = a.vol24h ?? 0; const vb = b.vol24h ?? 0;
+                if (vb !== va) return vb - va; // then higher volume
+            }
+            const ma = a.pct24h !== null ? Math.abs(a.pct24h) : 0;
+            const mb = b.pct24h !== null ? Math.abs(b.pct24h) : 0;
+            return mb - ma;
+        };
+        summaries.sort(cmp);
         const top = summaries.slice(0, resultCount);
         return { content: [ { type: "text", text: JSON.stringify(top, null, 2) } ] };
     }
