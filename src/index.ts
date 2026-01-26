@@ -97,11 +97,11 @@ server.tool(
     },
     async (params) => {
         const defaultParams = {
-            start: "1",
-            limit: "100",
-            convert: "USD",
             ...params,
         };
+        defaultParams.start = defaultParams.start || "1";
+        defaultParams.limit = defaultParams.limit || "100";
+        defaultParams.convert = defaultParams.convert || "USD";
 
         const data = await makeApiRequest(
             "/cryptocurrency/listings/latest",
@@ -167,9 +167,9 @@ server.tool(
         }
 
         const defaultParams = {
-            convert: "USD",
             ...params,
         };
+        defaultParams.convert = defaultParams.convert || "USD";
 
         const data = await makeApiRequest(
             "/cryptocurrency/quotes/latest",
@@ -219,11 +219,11 @@ server.tool(
     },
     async (params) => {
         const defaultParams = {
-            listing_status: "active",
-            start: "1",
-            limit: "100",
             ...params,
         };
+        defaultParams.listing_status = defaultParams.listing_status || "active";
+        defaultParams.start = defaultParams.start || "1";
+        defaultParams.limit = defaultParams.limit || "100";
 
         const data = await makeApiRequest("/cryptocurrency/map", defaultParams);
 
@@ -317,9 +317,9 @@ server.tool(
     },
     async (params) => {
         const defaultParams = {
-            convert: "USD",
             ...params,
         };
+        defaultParams.convert = defaultParams.convert || "USD";
 
         const data = await makeApiRequest(
             "/global-metrics/quotes/latest",
@@ -374,11 +374,11 @@ server.tool(
     },
     async (params) => {
         const defaultParams = {
-            start: "1",
-            limit: "100",
-            convert: "USD",
             ...params,
         };
+        defaultParams.start = defaultParams.start || "1";
+        defaultParams.limit = defaultParams.limit || "100";
+        defaultParams.convert = defaultParams.convert || "USD";
 
         const data = await makeApiRequest(
             "/exchange/listings/latest",
